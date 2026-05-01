@@ -17,6 +17,10 @@ const RED   = { name: 'Red',   value: 1, bg: '#CC0000', fg: '#fff' }
 const BLACK = COLORS[5]
 const MAX_SCORE = 149
 
+function getColorByName(name) {
+  return COLORS.find(color => color.name === name) ?? BLACK
+}
+
 function clampScore(score) {
   return Math.max(0, Math.min(MAX_SCORE, score))
 }
@@ -29,6 +33,7 @@ function clampScore(score) {
  * Colours phase: sum of remaining colours.
  */
 function calcRemaining(phase, reds, nextColor) {
+  if (phase === 'done') return 0
   if (phase === 'reds') return 8 * reds + 27
   const i = COLORS.findIndex(c => c.name === nextColor)
   return COLORS.slice(i).reduce((s, c) => s + c.value, 0)
@@ -39,13 +44,18 @@ function calcRemaining(phase, reds, nextColor) {
  * Reds phase → red + black per pair, then all colours.
  * Colours phase → remaining colours in order.
  */
-function buildSequence(phase, reds, nextColor) {
+function buildSequence(phase, reds, nextColor, redColorName) {
   if (phase === 'reds') {
-    const pairs = Array.from({ length: reds }, () => [RED, BLACK]).flat()
-    return [...pairs, ...COLORS]
+    const redColor = getColorByName(redColorName)
+    const pairs = Array.from({ length: reds }, () => [
+      { ...RED, shotType: 'red' },
+      { ...redColor, shotType: 'red-color' },
+    ]).flat()
+    return [...pairs, ...COLORS.map(color => ({ ...color, shotType: 'clearance-color' }))]
   }
+  if (phase === 'done') return []
   const i = COLORS.findIndex(c => c.name === nextColor)
-  return COLORS.slice(i)
+  return COLORS.slice(i).map(color => ({ ...color, shotType: 'clearance-color' }))
 }
 
 /**
@@ -56,20 +66,52 @@ function buildSequence(phase, reds, nextColor) {
  * Condition: p1 + cum > p2 + (totalRemaining − cum)
  *            ↔  2·cum > p2 − p1 + totalRemaining
  */
-function ballsToMathWin(sequence, p1Score, p2Score, totalRemaining, alreadyWon = false) {
+function ballsToMathWin(sequence, p1Score, p2Score, totalRemaining, options) {
+  const { alreadyWon = false, initialReds = 0, redColorName = 'Black' } = options
   let cum = 0
   let hasWon = alreadyWon
+  let redsLeft = initialReds
+  let opponentRemaining = totalRemaining
   const out = []
   for (const [index, ball] of sequence.entries()) {
     cum += ball.value
-    const nextBall = sequence[index + 1]
-    const reservedFollowUp = ball.name === 'Red' && nextBall ? nextBall.value : 0
-    const p2Remaining = totalRemaining - cum - reservedFollowUp
+
+    let nextReds = redsLeft
+    let nextColor = redsLeft > 0 ? 'Yellow' : null
+
+    if (ball.shotType === 'red') {
+      opponentRemaining = Math.max(0, opponentRemaining - 8)
+      redsLeft = Math.max(0, redsLeft - 1)
+      nextReds = redsLeft
+      nextColor = redsLeft === 0 ? redColorName : 'Yellow'
+    } else if (ball.shotType === 'red-color') {
+      nextReds = redsLeft
+      nextColor = redsLeft === 0 ? 'Yellow' : 'Yellow'
+    } else {
+      opponentRemaining = Math.max(0, opponentRemaining - ball.value)
+      nextReds = 0
+      nextColor = sequence[index + 1]?.shotType === 'clearance-color'
+        ? sequence[index + 1].name
+        : null
+    }
+
+    const p2Remaining = opponentRemaining
     const p1Total      = p1Score + cum
     const p2Max        = p2Score + p2Remaining
     const isWinning    = !alreadyWon && !hasWon && p1Total > p2Max
     const isAfterWin   = hasWon
-    out.push({ ...ball, cum, p1Total, p2Score, p2Remaining, p2Max, isWinning, isAfterWin })
+    out.push({
+      ...ball,
+      cum,
+      p1Total,
+      p2Score,
+      p2Remaining,
+      p2Max,
+      isWinning,
+      isAfterWin,
+      nextReds,
+      nextColor,
+    })
     if (isWinning) hasWon = true
   }
   return out
@@ -198,7 +240,8 @@ export default function App() {
   // Table state
   const [reds,      setReds]      = useState(15)
   const [nextColor, setNextColor] = useState('Yellow')
-  const phase = reds > 0 ? 'reds' : 'colors'
+  const [redColorName, setRedColorName] = useState('Black')
+  const phase = reds > 0 ? 'reds' : nextColor ? 'colors' : 'done'
 
   const remaining = useMemo(
     () => calcRemaining(phase, reds, nextColor),
@@ -206,8 +249,8 @@ export default function App() {
   )
 
   const sequence = useMemo(
-    () => buildSequence(phase, reds, nextColor),
-    [phase, reds, nextColor],
+    () => buildSequence(phase, reds, nextColor, redColorName),
+    [phase, reds, nextColor, redColorName],
   )
 
   // Math-win states from Player 1's perspective:
@@ -219,9 +262,19 @@ export default function App() {
   const frameDecided = p1AlreadyWon || p2HasWon
 
   const balls = useMemo(
-    () => ballsToMathWin(sequence, p1, p2, remaining, frameDecided),
-    [sequence, p1, p2, remaining, frameDecided],
+    () => ballsToMathWin(sequence, p1, p2, remaining, {
+      alreadyWon: frameDecided,
+      initialReds: reds,
+      redColorName,
+    }),
+    [sequence, p1, p2, remaining, frameDecided, reds, redColorName],
   )
+
+  function advanceToRow(row) {
+    setP1(row.p1Total)
+    setReds(row.nextReds)
+    setNextColor(row.nextColor)
+  }
 
   function renderRedCell(realIndex, key) {
     const isReal = realIndex < 15
@@ -318,6 +371,24 @@ export default function App() {
             onScoreChange={setP2}
           />
         </div>
+
+        <div className={`red-color-row ${phase !== 'reds' ? 'red-color-row--inactive' : ''}`}>
+          <span className="red-color-row__label">Red +</span>
+          <div className="red-color-row__choices" role="group" aria-label="Colour after red">
+            {DISPLAY_COLORS.map(color => (
+              <button
+                key={color.name}
+                type="button"
+                className={`red-color-choice ${redColorName === color.name ? 'red-color-choice--selected' : ''}`}
+                style={{ background: color.bg, color: color.fg }}
+                onClick={() => setRedColorName(color.name)}
+                aria-label={`Play ${color.name} with red`}
+              >
+                {color.value}
+              </button>
+            ))}
+          </div>
+        </div>
       </section>
 
       {/* ── Result ── */}
@@ -341,8 +412,10 @@ export default function App() {
 
             <div className="ball-list">
               {balls.map((b, i) => (
-                <div
+                <button
                   key={i}
+                  type="button"
+                  onClick={() => advanceToRow(b)}
                   className={`ball-item ${b.isWinning ? 'ball-item--win' : ''} ${b.isAfterWin ? 'ball-item--after-win' : ''}`}
                 >
                   <Ball ball={b} size={26} />
@@ -356,7 +429,7 @@ export default function App() {
                       <span className="p2max__eq">{b.p2Max}</span>
                     </span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
 
